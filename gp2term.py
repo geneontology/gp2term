@@ -1,8 +1,18 @@
-from ontobio.io.gpadparser import GpadParser
-from ontobio.io.assocwriter import GpadWriter
+# from ontobio.io.gpadparser import GpadParser
+# from ontobio.io.assocwriter import GpadWriter
+from ontobio.io.gafparser import GafParser
+from ontobio.io.assocwriter import GafWriter
 from ontobio.ontol_factory import OntologyFactory
 import os
 import csv
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-f', '--filename')
+parser.add_argument('-d', '--directory', help="Process a whole directory of files")
+parser.add_argument('-m', '--match_output_suffix')
+parser.add_argument('-l', '--leftover_output')
+parser.add_argument('-o', '--ontology', help="Filename of GO ontology file to use")
 
 aspect_lookup = {}
 
@@ -77,35 +87,49 @@ def get_iprs(annot):
             iprs.append(w)
     return iprs
 
-def annot_by_subject(annots, subject_id):
+def annots_by_subject(annots, subject_id):
+    found_annots = []
     for a in annots:
         if a["subject"]["id"] == subject_id:
-            return a
+            found_annots.append(a)
+    return found_annots
 
 def first_qualifier(annot):
     qualifiers = annot.get('qualifiers')
     if qualifiers and len(qualifiers) > 0:
         return qualifiers[0]
 
-onto = OntologyFactory().create("go")
+args = parser.parse_args()
+
+if args.ontology:
+    onto = OntologyFactory().create(args.ontology)
+else:
+    onto = OntologyFactory().create("go")
 
 dir = 'resources/'
+if args.filename:
+    filenames = [args.filename]
+else:
+    filenames = []
+    for f in os.listdir(dir):
+        filenames.append(dir + f)
 annots = []
 all_annots = []
 leftover_annots = []
-grouped_annots = {}
+# grouped_annots = {}
 # annots = {
 #     "IEA": [],
 #     "IBA": [],
 # }
-for f in os.listdir(dir):
+for f in filenames:
+    grouped_annots = {}
     print(f)
-    mod = f.split(".")[0]
+    mod = f.split(".")[-1]
     # annots[mod] = {
     #     "IEA": [],
     #     "IBA": []
     # }
-    mod_annots = GpadParser().parse(dir + f, skipheader=True)
+    mod_annots = GafParser().parse(f, skipheader=True)
     all_annots = all_annots + mod_annots
     for a in mod_annots:
         term = a["object"]["id"]
@@ -128,58 +152,73 @@ for f in os.listdir(dir):
                             }
                         else:
                             grouped_annots[i]["BP"].append(a)
-        if not using_annot:
-            leftover_annots.append(a)
+            if not using_annot:
+                leftover_annots.append(a)
+    # print("Total:", len(all_annots))
+    # print("Leftovers:", len(leftover_annots))
+
+    # Find MF annots for BP-derived IPRs
+    for a in mod_annots:
+        term = a["object"]["id"]
+        aspect = get_aspect(term)
+        if aspect == "MF":
+            iprs = get_iprs(a)
+            for i in iprs:
+                if i in grouped_annots:
+                    grouped_annots[i]["MF"].append(a)
+
+    # Filter out IPRs with no MF annots from last step
+    filtered_annots = {}
+    match_rows = []
+    base_f = os.path.basename(f)
+    match_outfile = base_f + "_matching_IPRs.tsv"
+    if args.match_output_suffix:
+        match_outfile = "{}_{}".format(base_f, args.match_output_suffix)
+    with open(match_outfile, 'w') as mof:
+        writer = csv.writer(mof, delimiter="\t")
+        for k in grouped_annots:
+            if len(grouped_annots[k]["MF"]) > 0:
+                # Keep it
+                filtered_annots[k] = grouped_annots[k]
+                for a in grouped_annots[k]["BP"]:
+                    gene_id = a["subject"]["id"]
+                    gene_id_bits = gene_id.split(":")
+                    mf_annots = annots_by_subject(grouped_annots[k]["MF"], gene_id)
+                    if len(mf_annots) == 0:
+                        # Should probably add this BP annot back to unused list
+                        if a not in leftover_annots:
+                            leftover_annots.append(a)
+                        continue
+                    for mfa in mf_annots:
+                        id_ns = gene_id_bits[0]
+                        id = gene_id_bits[-1]
+                        relation = first_qualifier(a)
+                        bp_term = a["object"]["id"]
+                        bp_term_label = onto.label(bp_term)
+                        bp_evidence_code = a["evidence"]["type"]
+                        bp_reference = ",".join(a["evidence"]["has_supporting_reference"])
+                        bp_assigned_by = a["provided_by"]
+                        mf_term = mfa["object"]["id"]
+                        mf_term_label = onto.label(mf_term)
+                        mf_evidence_code = mfa["evidence"]["type"]
+                        mf_reference = ",".join(mfa["evidence"]["has_supporting_reference"])
+                        mf_assigned_by = mfa["provided_by"]
+                        out_fields = [k, id_ns, id, relation,
+                                      bp_term, bp_term_label, bp_evidence_code, bp_reference, bp_assigned_by,
+                                      mf_term, mf_term_label, mf_evidence_code, mf_reference, mf_assigned_by]
+                        match_rows.append(out_fields)
+
+        # L.sort(key=lambda k: (k[0], -k[1]), reverse=True)
+        match_rows.sort(key=lambda k: k[2])
+        for mr in match_rows:
+            writer.writerow(mr)
+
 print("Total:", len(all_annots))
 print("Leftovers:", len(leftover_annots))
-
-# Find MF annots for BP-derived IPRs
-for a in all_annots:
-    term = a["object"]["id"]
-    aspect = get_aspect(term)
-    if aspect == "MF":
-        iprs = get_iprs(a)
-        for i in iprs:
-            if i in grouped_annots:
-                grouped_annots[i]["MF"].append(a)
-
-# Filter out IPRs with no MF annots from last step
-filtered_annots = {}
-with open("matching_IPRs.tsv", 'w') as f:
-    writer = csv.writer(f, delimiter="\t")
-    for k in grouped_annots:
-        if len(grouped_annots[k]["MF"]) > 0:
-            # Keep it
-            filtered_annots[k] = grouped_annots[k]
-            for a in grouped_annots[k]["BP"]:
-                gene_id = a["subject"]["id"]
-                mf_annot = annot_by_subject(grouped_annots[k]["MF"], gene_id)
-                if mf_annot is None:
-                    # Should probably add this BP annot back to unused list
-                    if a not in leftover_annots:
-                        leftover_annots.append(a)
-                    continue
-                gene_id_bits = gene_id.split(":")
-                id_ns = gene_id_bits[0]
-                id = gene_id_bits[-1]
-                relation = first_qualifier(a)
-                bp_term = a["object"]["id"]
-                bp_term_label = onto.label(bp_term)
-                bp_evidence_code = a["evidence"]["type"]
-                bp_reference = ",".join(a["evidence"]["has_supporting_reference"])
-                bp_assigned_by = a["provided_by"]
-                mf_term = mf_annot["object"]["id"]
-                mf_term_label = onto.label(mf_term)
-                mf_evidence_code = mf_annot["evidence"]["type"]
-                mf_reference = ",".join(mf_annot["evidence"]["has_supporting_reference"])
-                mf_assigned_by = mf_annot["provided_by"]
-                out_fields = [k, id_ns, id, relation,
-                              bp_term, bp_term_label, bp_evidence_code, bp_reference, bp_assigned_by,
-                              mf_term, mf_term_label, mf_evidence_code, mf_reference, mf_assigned_by]
-                writer.writerow(out_fields)
-
-print("Leftovers:", len(leftover_annots))
-with open("leftovers.gpad", "w") as lf:
-    gpad_writer = GpadWriter(lf)
+outfile = "leftovers.gaf"
+if args.leftover_output:
+    outfile = args.leftover_output
+with open(outfile, "w") as lf:
+    gaf_writer = GafWriter(lf)
     for a in leftover_annots:
-        gpad_writer.write_assoc(a)
+        gaf_writer.write_assoc(a)
