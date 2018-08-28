@@ -16,6 +16,7 @@ parser.add_argument('-l', '--leftover_output')
 parser.add_argument('-o', '--ontology', help="Filename of GO ontology file to use")
 
 aspect_lookup = {}
+EVI_CODE_TO_WITH_PREFIX = dict(IEA="InterPro:IPR", IBA="PANTHER:PTN")
 
 def get_ancestors(go_term):
     ### BFO:0000050 = part of
@@ -106,6 +107,63 @@ def first_qualifier(annot):
     if qualifiers and len(qualifiers) > 0:
         return qualifiers[0]
 
+def file_away(annot_dict, annot):
+    ### Data structure:
+    # annot_dict = {
+    #   "IEA": {
+    #       "InterPro:IPR58694": [annot1, annot2],
+    #       "InterPro:IPR37482": [annot3, annot4],
+    #   },
+    #   "IBA": {
+    #       "PANTHER:PTN58694": [annot5, annot6],
+    #       "PANTHER:PTN95847": [annot7, annot8],
+    #   }
+    # }
+    ### TODO: Need method for uniq-ing annot lists due to multiple with matches
+    ### TODO: Need method for pulling BP vs MF annots
+    evi_code = annot["evidence"]["type"]
+    using_annot = False  # don't know yet
+    if evi_code not in EVI_CODE_TO_WITH_PREFIX:
+        return annot_dict, using_annot
+    matches = match_in_with_col(annot, EVI_CODE_TO_WITH_PREFIX[evi_code])
+    for m in matches:
+        using_annot = True
+        if evi_code not in annot_dict:
+            # Really should be subkeying with value. Which withs? Create mapping of evi_code to with prefixes
+            annot_dict[evi_code] = {m: [annot]}
+        elif m not in annot_dict[evi_code]:
+            annot_dict[evi_code][m] = [annot]
+        else:
+            annot_dict[evi_code][m].append(annot)
+    return annot_dict, using_annot
+
+def flatten_with_dict(with_dict, uniqify=False):
+    all_annots_list = []
+    for with_value in with_dict:
+        for a in with_dict[with_value]:
+            all_annots_list.append(a)
+    if uniqify:
+        temp_list = []
+        for a in all_annots_list:
+            if a not in temp_list:
+                temp_list.append(a)
+        all_annots_list = temp_list
+            # if uniqify and a not in all_annots_list:
+            #     all_annots_list.append(a)
+            # elif not uniqify:
+            #     all_annots_list.append(a)
+    return all_annots_list
+
+def match_aspect(annots, aspect):
+    matching_annots = []
+    for annot in annots:
+        if annot["aspect"] == aspect:
+            matching_annots.append(annot)
+    return matching_annots
+
+# Group all annots by evi code
+# Find matches between with values (Sames evi_code structure)
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -127,98 +185,65 @@ if __name__ == "__main__":
             filenames.append(dir + f)
     annots = []
     all_annots = []
-    leftover_annots = []
-    # grouped_annots = {}
-    # annots = {
-    #     "IEA": [],
-    #     "IBA": [],
-    # }
+    all_bp_ev_counts = {}
     for f in filenames:
-        iba_count = 0
         grouped_annots = {}
+        weird_attempt = {}
+        leftover_annots = []
         print(f)
-        mod = f.split(".")[-1]
-        # annots[mod] = {
-        #     "IEA": [],
-        #     "IBA": []
-        # }
         mod_annots = GafParser(config).parse(f, skipheader=True)
         all_annots = all_annots + mod_annots
         for a in mod_annots:
             term = a["object"]["id"]
-            aspect = get_aspect(term)
+            # aspect = get_aspect(term)
+            aspect = a["aspect"]
             # Cache aspect lookup in ontology and reuse - probably small list
             # aspect = lookup_aspect(term)
-            using_annot = False
-            if aspect == "BP":
-                with_matches = []
-                evidence_code = a["evidence"]["type"]
-                if evidence_code == "IEA":
-                    with_matches = get_iprs(a)
-                elif evidence_code == "IBA":
-                    with_matches = get_ptns(a)
-                    iba_count += len(with_matches)
-                if len(with_matches) > 0:
-                    annots.append(a)
-                    for m in with_matches:
-                        using_annot = True
-                        if m not in grouped_annots:
-                            grouped_annots[m] = {
-                                "BP": [a],
-                                "MF": []
-                            }
-                        else:
-                            grouped_annots[m]["BP"].append(a)
+            # using_annot = False
+            if aspect == "P" or aspect == "F":
+                weird_attempt, using_annot = file_away(weird_attempt, a)
                 if not using_annot:
                     leftover_annots.append(a)
-        # print("Total:", len(all_annots))
-        # print("Leftovers:", len(leftover_annots))
-        print("BP IBA withs count:", iba_count)
-        iba_count = 0
+                if aspect == "P":
+                    evidence_code = a["evidence"]["type"]
+                    if evidence_code not in all_bp_ev_counts:
+                        all_bp_ev_counts[evidence_code] = 1
+                    else:
+                        all_bp_ev_counts[evidence_code] += 1
 
-        # Find MF annots for BP-derived IPRs
-        for a in mod_annots:
-            term = a["object"]["id"]
-            aspect = get_aspect(term)
-            if aspect == "MF":
-                with_matches = []
-                evidence_code = a["evidence"]["type"]
-                if evidence_code == "IEA":
-                    with_matches = get_iprs(a)
-                elif evidence_code == "IBA":
-                    with_matches = get_ptns(a)
-                    iba_count += len(with_matches)
-                for m in with_matches:
-                    if m in grouped_annots:
-                        grouped_annots[m]["MF"].append(a)
-        print("MF IBA withs count:", iba_count)
-        iba_count = 0
-
-        # Filter out IPRs with no MF annots from last step
-        filtered_annots = {}
+        dismissed_annots = []
         match_rows = []
         base_f = os.path.basename(f)
         match_outfile = base_f + "_matches.tsv"
         if args.match_output_suffix:
-            match_outfile = "{}_{}".format(base_f, args.match_output_suffix)
+            match_outfile = "{}.{}.tsv".format(base_f, args.match_output_suffix)
         with open(match_outfile, 'w') as mof:
             writer = csv.writer(mof, delimiter="\t")
-            for k in grouped_annots:
-                if len(grouped_annots[k]["MF"]) > 0:
-                    # Keep it
-                    filtered_annots[k] = grouped_annots[k]
-                    for a in grouped_annots[k]["BP"]:
-                        gene_id = a["subject"]["id"]
-                        gene_id_bits = gene_id.split(":")
-                        mf_annots = annots_by_subject(grouped_annots[k]["MF"], gene_id)
-                        if len(mf_annots) == 0:
-                            # Should probably add this BP annot back to unused list
-                            if a not in leftover_annots:
-                                leftover_annots.append(a)
-                            continue
-                        for mfa in mf_annots:
+            for ec in weird_attempt:
+                ### For each evi_code, count unique annots that have with_matches (flatten dict)
+                print("BP {} withs count: {}".format(ec, len(flatten_with_dict(weird_attempt[ec], uniqify=True))))
+                ### Loop through with_value annots, segregate BPs from MFs, if len(BPs) > 0 and len(MFs) > 0 this with_value set gets written out
+                for with_value in weird_attempt[ec]:
+                    bp_annots = match_aspect(weird_attempt[ec][with_value], 'P')
+                    mf_annots = match_aspect(weird_attempt[ec][with_value], 'F')
+                    if len(bp_annots) < 1:
+                        weird_attempt[ec][with_value] = [] # Delete this key
+                    elif len(mf_annots) < 1:
+                        dismissed_annots = dismissed_annots + bp_annots # Cleanup (uniqify, remove annots promoted elsewhere) later
+                        weird_attempt[ec][with_value] = [] # Delete this key
+                    else: # Continue on promoting
+                        for a in bp_annots:
+                            gene_id = a["subject"]["id"]
+                            gene_id_bits = gene_id.split(":")
                             id_ns = gene_id_bits[0]
                             id = gene_id_bits[-1]
+                            mf_annots = annots_by_subject(mf_annots, gene_id)
+                            if len(mf_annots) == 0:
+                                # Should probably add this BP annot back to unused list
+                                if a not in leftover_annots:
+                                    leftover_annots.append(a)
+                                continue
+
                             gene_symbol = a["subject"]["label"]
                             relation = first_qualifier(a)
                             bp_term = a["object"]["id"]
@@ -226,27 +251,42 @@ if __name__ == "__main__":
                             bp_evidence_code = a["evidence"]["type"]
                             bp_reference = ",".join(a["evidence"]["has_supporting_reference"])
                             bp_assigned_by = a["provided_by"]
-                            mf_term = mfa["object"]["id"]
-                            mf_term_label = onto.label(mf_term)
-                            mf_evidence_code = mfa["evidence"]["type"]
-                            mf_reference = ",".join(mfa["evidence"]["has_supporting_reference"])
-                            mf_assigned_by = mfa["provided_by"]
-                            out_fields = [k, id_ns, id, gene_symbol, relation,
-                                          bp_term, bp_term_label, bp_evidence_code, bp_reference, bp_assigned_by,
-                                          mf_term, mf_term_label, mf_evidence_code, mf_reference, mf_assigned_by]
-                            match_rows.append(out_fields)
+                            for mfa in mf_annots:
+                                mf_term = mfa["object"]["id"]
+                                mf_term_label = onto.label(mf_term)
+                                mf_evidence_code = mfa["evidence"]["type"]
+                                mf_reference = ",".join(mfa["evidence"]["has_supporting_reference"])
+                                mf_assigned_by = mfa["provided_by"]
+                                out_fields = [with_value, id_ns, id, gene_symbol, relation,
+                                              bp_term, bp_term_label, bp_evidence_code, bp_reference, bp_assigned_by,
+                                              mf_term, mf_term_label, mf_evidence_code, mf_reference, mf_assigned_by]
+                                match_rows.append(out_fields)
+                match_rows.sort(key=lambda k: k[2])
+                for mr in match_rows:
+                    writer.writerow(mr)
+        # print("Total:", len(all_annots))
+        # print("Leftovers:", len(leftover_annots))
 
-            # L.sort(key=lambda k: (k[0], -k[1]), reverse=True)
-            match_rows.sort(key=lambda k: k[2])
-            for mr in match_rows:
-                writer.writerow(mr)
+        all_promoted_annots = []
+        for ev in weird_attempt:
+            promoted_bp_annots = match_aspect(flatten_with_dict(weird_attempt[ev], uniqify=True), 'P')
+            all_promoted_annots = all_promoted_annots + promoted_bp_annots
+            print("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
+            # 5000 IEA BP annotations ‘involved in’
+            print("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
+
+        ### Cleanup leftovers
+        for da in dismissed_annots:
+            if da not in leftover_annots and da not in all_promoted_annots:
+                leftover_annots.append(da)
+
+        print("Leftovers:", len(leftover_annots))
+        outfile = base_f + "_leftovers.gaf"
+        if args.leftover_output:
+            outfile = "{}.{}_leftovers.gaf".format(base_f, args.leftover_output)
+        with open(outfile, "w") as lf:
+            gaf_writer = GafWriter(lf)
+            for a in leftover_annots:
+                gaf_writer.write_assoc(a)
 
     print("Total:", len(all_annots))
-    print("Leftovers:", len(leftover_annots))
-    outfile = "leftovers.gaf"
-    if args.leftover_output:
-        outfile = args.leftover_output
-    with open(outfile, "w") as lf:
-        gaf_writer = GafWriter(lf)
-        for a in leftover_annots:
-            gaf_writer.write_assoc(a)
