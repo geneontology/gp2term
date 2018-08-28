@@ -14,8 +14,10 @@ parser.add_argument('-d', '--directory', help="Process a whole directory of file
 parser.add_argument('-m', '--match_output_suffix')
 parser.add_argument('-l', '--leftover_output')
 parser.add_argument('-o', '--ontology', help="Filename of GO ontology file to use")
+parser.add_argument('-e', '--log_filepath', help="destination of log file")
 
 aspect_lookup = {}
+log_file = None
 EVI_CODE_TO_WITH_PREFIX = dict(IEA="InterPro:IPR", IBA="PANTHER:PTN")
 
 def get_ancestors(go_term):
@@ -161,6 +163,9 @@ def match_aspect(annots, aspect):
             matching_annots.append(annot)
     return matching_annots
 
+def log(message):
+    log_file.write(message + "\n")
+
 # Group all annots by evi code
 # Find matches between with values (Sames evi_code structure)
 
@@ -171,6 +176,11 @@ if __name__ == "__main__":
         onto = OntologyFactory().create(args.ontology)
     else:
         onto = OntologyFactory().create("go")
+
+    log_filepath = "gp2t_log.txt"
+    if args.log_filepath:
+        log_filepath = args.log_filepath
+    log_file = open(log_filepath, 'w+')
 
     # Needed to retain IBA annotations
     config = AssocParserConfig()
@@ -191,6 +201,7 @@ if __name__ == "__main__":
         weird_attempt = {}
         leftover_annots = []
         print(f)
+        log(f)
         mod_annots = GafParser(config).parse(f, skipheader=True)
         all_annots = all_annots + mod_annots
         for a in mod_annots:
@@ -222,6 +233,7 @@ if __name__ == "__main__":
             for ec in weird_attempt:
                 ### For each evi_code, count unique annots that have with_matches (flatten dict)
                 print("BP {} withs count: {}".format(ec, len(flatten_with_dict(weird_attempt[ec], uniqify=True))))
+                log("BP {} withs count: {}".format(ec, len(flatten_with_dict(weird_attempt[ec], uniqify=True))))
                 ### Loop through with_value annots, segregate BPs from MFs, if len(BPs) > 0 and len(MFs) > 0 this with_value set gets written out
                 for with_value in weird_attempt[ec]:
                     bp_annots = match_aspect(weird_attempt[ec][with_value], 'P')
@@ -272,8 +284,10 @@ if __name__ == "__main__":
             promoted_bp_annots = match_aspect(flatten_with_dict(weird_attempt[ev], uniqify=True), 'P')
             all_promoted_annots = all_promoted_annots + promoted_bp_annots
             print("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
+            log("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
             # 5000 IEA BP annotations ‘involved in’
             print("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
+            log("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
 
         ### Cleanup leftovers
         for da in dismissed_annots:
@@ -281,6 +295,7 @@ if __name__ == "__main__":
                 leftover_annots.append(da)
 
         print("Leftovers:", len(leftover_annots))
+        log("Leftovers: {}".format(len(leftover_annots)))
         outfile = base_f + "_leftovers.gaf"
         if args.leftover_output:
             outfile = "{}.{}_leftovers.gaf".format(base_f, args.leftover_output)
@@ -290,3 +305,6 @@ if __name__ == "__main__":
                 gaf_writer.write_assoc(a)
 
     print("Total:", len(all_annots))
+    log("Total: {}".format(len(all_annots)))
+
+    log_file.close()
