@@ -164,6 +164,7 @@ def match_aspect(annots, aspect):
     return matching_annots
 
 def log(message):
+    print(message)
     log_file.write(message + "\n")
 
 # Group all annots by evi code
@@ -198,24 +199,18 @@ if __name__ == "__main__":
     all_bp_ev_counts = {}
     for f in filenames:
         grouped_annots = {}
-        weird_attempt = {}
         leftover_annots = []
-        print(f)
         log(f)
         mod_annots = GafParser(config).parse(f, skipheader=True)
         all_annots = all_annots + mod_annots
         for a in mod_annots:
             term = a["object"]["id"]
-            # aspect = get_aspect(term)
             aspect = a["aspect"]
-            # Cache aspect lookup in ontology and reuse - probably small list
-            # aspect = lookup_aspect(term)
-            # using_annot = False
             if aspect == "P" or aspect == "F":
-                weird_attempt, using_annot = file_away(weird_attempt, a)
-                if not using_annot:
-                    leftover_annots.append(a)
+                grouped_annots, using_annot = file_away(grouped_annots, a)
                 if aspect == "P":
+                    if not using_annot:
+                        leftover_annots.append(a)
                     evidence_code = a["evidence"]["type"]
                     if evidence_code not in all_bp_ev_counts:
                         all_bp_ev_counts[evidence_code] = 1
@@ -230,25 +225,25 @@ if __name__ == "__main__":
             match_outfile = "{}.{}.tsv".format(base_f, args.match_output_suffix)
         with open(match_outfile, 'w') as mof:
             writer = csv.writer(mof, delimiter="\t")
-            for ec in weird_attempt:
+            for ec in grouped_annots:
                 ### For each evi_code, count unique annots that have with_matches (flatten dict)
-                print("BP {} withs count: {}".format(ec, len(flatten_with_dict(weird_attempt[ec], uniqify=True))))
-                log("BP {} withs count: {}".format(ec, len(flatten_with_dict(weird_attempt[ec], uniqify=True))))
+                log("BP {} withs count: {}".format(ec, len(flatten_with_dict(grouped_annots[ec], uniqify=True))))
                 ### Loop through with_value annots, segregate BPs from MFs, if len(BPs) > 0 and len(MFs) > 0 this with_value set gets written out
-                for with_value in weird_attempt[ec]:
-                    bp_annots = match_aspect(weird_attempt[ec][with_value], 'P')
-                    mf_annots = match_aspect(weird_attempt[ec][with_value], 'F')
+                for with_value in grouped_annots[ec]:
+                    bp_annots = match_aspect(grouped_annots[ec][with_value], 'P')
+                    mf_annots = match_aspect(grouped_annots[ec][with_value], 'F')
                     if len(bp_annots) < 1:
-                        weird_attempt[ec][with_value] = [] # Delete this key
+                        grouped_annots[ec][with_value] = [] # Delete this key
                     elif len(mf_annots) < 1:
                         dismissed_annots = dismissed_annots + bp_annots # Cleanup (uniqify, remove annots promoted elsewhere) later
-                        weird_attempt[ec][with_value] = [] # Delete this key
+                        grouped_annots[ec][with_value] = [] # Delete this key
                     else: # Continue on promoting
                         for a in bp_annots:
                             gene_id = a["subject"]["id"]
                             gene_id_bits = gene_id.split(":")
                             id_ns = gene_id_bits[0]
                             id = gene_id_bits[-1]
+                            # Find 'with-matched' MF annotations to same gene product
                             mf_annots = annots_by_subject(mf_annots, gene_id)
                             if len(mf_annots) == 0:
                                 # Should probably add this BP annot back to unused list
@@ -280,13 +275,11 @@ if __name__ == "__main__":
         # print("Leftovers:", len(leftover_annots))
 
         all_promoted_annots = []
-        for ev in weird_attempt:
-            promoted_bp_annots = match_aspect(flatten_with_dict(weird_attempt[ev], uniqify=True), 'P')
+        for ev in grouped_annots:
+            promoted_bp_annots = match_aspect(flatten_with_dict(grouped_annots[ev], uniqify=True), 'P')
             all_promoted_annots = all_promoted_annots + promoted_bp_annots
-            print("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
             log("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
             # 5000 IEA BP annotations ‘involved in’
-            print("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
             log("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
 
         ### Cleanup leftovers
@@ -294,7 +287,7 @@ if __name__ == "__main__":
             if da not in leftover_annots and da not in all_promoted_annots:
                 leftover_annots.append(da)
 
-        print("Leftovers:", len(leftover_annots))
+        # print("Leftovers:", len(leftover_annots))
         log("Leftovers: {}".format(len(leftover_annots)))
         outfile = base_f + "_leftovers.gaf"
         if args.leftover_output:
@@ -304,7 +297,6 @@ if __name__ == "__main__":
             for a in leftover_annots:
                 gaf_writer.write_assoc(a)
 
-    print("Total:", len(all_annots))
     log("Total: {}".format(len(all_annots)))
 
     log_file.close()
