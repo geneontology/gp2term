@@ -167,42 +167,27 @@ def log(message):
     print(message)
     log_file.write(message + "\n")
 
-# Group all annots by evi code
-# Find matches between with values (Sames evi_code structure)
+class Gp2TermGafParser(GafParser):
+    def __init__(self):
+        # Needed to retain IBA annotations
+        config = AssocParserConfig()
+        config.paint = True
+        GafParser.__init__(self, config=config)
 
-if __name__ == "__main__":
-    args = parser.parse_args()
+class MatchMaker():
+    def __init__(self, ontology):
+        self.all_annots = []
+        self.parser = Gp2TermGafParser()
+        self.ontology = ontology
+        self.all_promoted_annots = []
 
-    if args.ontology:
-        onto = OntologyFactory().create(args.ontology)
-    else:
-        onto = OntologyFactory().create("go")
-
-    log_filepath = "gp2t_log.txt"
-    if args.log_filepath:
-        log_filepath = args.log_filepath
-    log_file = open(log_filepath, 'w+')
-
-    # Needed to retain IBA annotations
-    config = AssocParserConfig()
-    config.paint = True
-
-    dir = 'resources/'
-    if args.filename:
-        filenames = [args.filename]
-    else:
-        filenames = []
-        for f in os.listdir(dir):
-            filenames.append(dir + f)
-    annots = []
-    all_annots = []
-    all_bp_ev_counts = {}
-    for f in filenames:
+    def find_iea_iba_matches(self, filename):
+        all_bp_ev_counts = {}
         grouped_annots = {}
         leftover_annots = []
-        log(f)
-        mod_annots = GafParser(config).parse(f, skipheader=True)
-        all_annots = all_annots + mod_annots
+        log(filename)
+        mod_annots = self.parser.parse(filename, skipheader=True)
+        self.all_annots = self.all_annots + mod_annots
         for a in mod_annots:
             term = a["object"]["id"]
             aspect = a["aspect"]
@@ -218,7 +203,7 @@ if __name__ == "__main__":
                         all_bp_ev_counts[evidence_code] += 1
 
         dismissed_annots = []
-        match_rows = []
+        # match_rows = []
         base_f = os.path.basename(f)
         match_outfile = base_f + "_matches.tsv"
         if args.match_output_suffix:
@@ -226,26 +211,27 @@ if __name__ == "__main__":
         with open(match_outfile, 'w') as mof:
             writer = csv.writer(mof, delimiter="\t")
             for ec in grouped_annots:
+                match_rows = []
                 ### For each evi_code, count unique annots that have with_matches (flatten dict)
-                log("BP {} withs count: {}".format(ec, len(flatten_with_dict(grouped_annots[ec], uniqify=True))))
+                log("BP {} withs count: {}".format(ec, len(match_aspect(flatten_with_dict(grouped_annots[ec], uniqify=True), 'P'))))
                 ### Loop through with_value annots, segregate BPs from MFs, if len(BPs) > 0 and len(MFs) > 0 this with_value set gets written out
                 for with_value in grouped_annots[ec]:
                     bp_annots = match_aspect(grouped_annots[ec][with_value], 'P')
                     mf_annots = match_aspect(grouped_annots[ec][with_value], 'F')
                     if len(bp_annots) < 1:
-                        grouped_annots[ec][with_value] = [] # Delete this key
+                        grouped_annots[ec][with_value] = []  # Delete this key
                     elif len(mf_annots) < 1:
-                        dismissed_annots = dismissed_annots + bp_annots # Cleanup (uniqify, remove annots promoted elsewhere) later
-                        grouped_annots[ec][with_value] = [] # Delete this key
-                    else: # Continue on promoting
+                        dismissed_annots = dismissed_annots + bp_annots  # Cleanup (uniqify, remove annots promoted elsewhere) later
+                        grouped_annots[ec][with_value] = []  # Delete this key
+                    else:  # Continue on promoting
                         for a in bp_annots:
                             gene_id = a["subject"]["id"]
                             gene_id_bits = gene_id.split(":")
                             id_ns = gene_id_bits[0]
                             id = gene_id_bits[-1]
                             # Find 'with-matched' MF annotations to same gene product
-                            mf_annots = annots_by_subject(mf_annots, gene_id)
-                            if len(mf_annots) == 0:
+                            gene_mf_annots = annots_by_subject(mf_annots, gene_id)
+                            if len(gene_mf_annots) == 0:
                                 # Should probably add this BP annot back to unused list
                                 if a not in leftover_annots:
                                     leftover_annots.append(a)
@@ -254,13 +240,13 @@ if __name__ == "__main__":
                             gene_symbol = a["subject"]["label"]
                             relation = first_qualifier(a)
                             bp_term = a["object"]["id"]
-                            bp_term_label = onto.label(bp_term)
+                            bp_term_label = self.ontology.label(bp_term)
                             bp_evidence_code = a["evidence"]["type"]
                             bp_reference = ",".join(a["evidence"]["has_supporting_reference"])
                             bp_assigned_by = a["provided_by"]
-                            for mfa in mf_annots:
+                            for mfa in gene_mf_annots:
                                 mf_term = mfa["object"]["id"]
-                                mf_term_label = onto.label(mf_term)
+                                mf_term_label = self.ontology.label(mf_term)
                                 mf_evidence_code = mfa["evidence"]["type"]
                                 mf_reference = ",".join(mfa["evidence"]["has_supporting_reference"])
                                 mf_assigned_by = mfa["provided_by"]
@@ -281,7 +267,10 @@ if __name__ == "__main__":
             log("{} {} BP annotations inputted".format(all_bp_ev_counts[ev], ev))
             # 5000 IEA BP annotations ‘involved in’
             log("{} {} BP annotations ‘involved in’".format(len(promoted_bp_annots), ev))
+        # self.all_promoted_annots[filename] = all_promoted_annots
+        self.all_promoted_annots = self.all_promoted_annots + all_promoted_annots
 
+        ## Something going on below is super slow!
         ### Cleanup leftovers
         for da in dismissed_annots:
             if da not in leftover_annots and da not in all_promoted_annots:
@@ -297,6 +286,50 @@ if __name__ == "__main__":
             for a in leftover_annots:
                 gaf_writer.write_assoc(a)
 
-    log("Total: {}".format(len(all_annots)))
+    def match_experimentals(self, filename):
+        ### Take in leftovers file
+        annots = self.parser.parse(filename, skipheader=True)
+        ### Filter for exp evidence codes (IMP, IDA, IGI, IPI, IEP, ISS)
+
+        ### check GP, term, against self.all_promoted_annots. Do I need to keep these separated?
+        if filename in self.all_promoted_annots:
+            self.all_promoted_annots[filename]
+        else:
+            log("No promoted annotations entry for '{}'".format(filename))
+
+# Group all annots by evi code
+# Find matches between with values (Sames evi_code structure)
+if __name__ == "__main__":
+    args = parser.parse_args()
+
+    if args.ontology:
+        onto = OntologyFactory().create(args.ontology)
+    else:
+        onto = OntologyFactory().create("go")
+    parser = Gp2TermGafParser()
+    mmaker = MatchMaker(onto)
+
+    log_filepath = "gp2t_log.txt"
+    if args.log_filepath:
+        log_filepath = args.log_filepath
+    log_file = open(log_filepath, 'w+')
+
+    dir = 'resources/'
+    if args.directory:
+        dir = args.directory
+    if args.filename:
+        filenames = [args.filename]
+    else:
+        filenames = []
+        for f in os.listdir(dir):
+            filenames.append(dir + f)
+
+    for f in filenames:
+        ### TODO: Methodize this
+        mmaker.find_iea_iba_matches(f)
+
+        #
+
+    log("Total: {}".format(len(mmaker.all_annots)))
 
     log_file.close()
