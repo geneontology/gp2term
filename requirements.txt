@@ -9,7 +9,7 @@ isodate==0.6.0
 jsobject==0.10.2
 marshmallow==3.0.0b3
 networkx==1.11
-numpy==1.14.5
+numpy==1.22.0
 ontobio==1.2.4
 pandas==0.23.3
 pathtools==0.1.2
